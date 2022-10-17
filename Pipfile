@@ -12,6 +12,7 @@ wheel = "*"
 pytest = "*"
 pytest-cov = "*"
 pytest-benchmark = "*"
+pytest-memray = "*"
 
 [packages]
 numpy = "*"

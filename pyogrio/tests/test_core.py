@@ -104,6 +104,16 @@ def test_read_bounds(naturalearth_lowres):
     assert allclose(bounds[:, 0], [-180.0, -18.28799, 180.0, -16.02088])
 
 
+@pytest.mark.limit_memory("5 MB")
+def test_read_bounds__memory_leak(naturalearth_lowres):
+    for _ in range(25):
+        fids, bounds = read_bounds(naturalearth_lowres)
+        assert fids.shape == (177,)
+        assert bounds.shape == (4, 177)
+        del fids
+        del bounds
+
+
 def test_read_bounds_max_features(naturalearth_lowres):
     bounds = read_bounds(naturalearth_lowres, max_features=2)[1]
     assert bounds.shape == (4, 2)

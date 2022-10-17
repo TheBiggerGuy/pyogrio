@@ -230,7 +230,7 @@ setup(
     install_requires=["certifi", "numpy"],
     extras_require={
         "dev": ["Cython"],
-        "test": ["pytest", "pytest-cov"],
+        "test": ["pytest", "pytest-cov", "pytest-memray"],
         "benchmark": ["pytest-benchmark"],
         "geopandas": ["pygeos", "geopandas"],
     },

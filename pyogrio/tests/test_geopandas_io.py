@@ -55,6 +55,14 @@ def test_read_dataframe(naturalearth_lowres_all_ext):
     ]
 
 
+@pytest.mark.limit_memory("5 MB")
+def test_read_dataframe__memory_leak(naturalearth_lowres):
+    for _ in range(25):
+        df = read_dataframe(naturalearth_lowres)
+        assert len(df) == 177
+        del df
+
+
 def test_read_dataframe_vsi(naturalearth_lowres_vsi):
     df = read_dataframe(naturalearth_lowres_vsi[1])
     assert len(df) == 177
