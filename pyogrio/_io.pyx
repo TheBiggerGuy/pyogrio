@@ -644,38 +644,44 @@ cdef get_features(
             break
 
         try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
+            try:
+                ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
 
-        except NullPointerError:
-            # No more rows available, so stop reading
-            break
+            except NullPointerError:
+                # No more rows available, so stop reading
+                break
 
-        except CPLE_BaseError as exc:
-            if "failed to prepare SQL" in str(exc):
-                raise ValueError(f"Invalid SQL query") from exc
+            except CPLE_BaseError as exc:
+                if "failed to prepare SQL" in str(exc):
+                    raise ValueError(f"Invalid SQL query") from exc
 
-            raise FeatureError(str(exc))
+                raise FeatureError(str(exc))
 
-        if i >= num_features:
-            raise FeatureError(
-                "GDAL returned more records than expected based on the count of "
-                "records that may meet your combination of filters against this "
-                "dataset.  Please open an issue on Github "
-                "(https://github.com/geopandas/pyogrio/issues) to report encountering "
-                "this error."
-            ) from None
+            if i >= num_features:
+                raise FeatureError(
+                    "GDAL returned more records than expected based on the count of "
+                    "records that may meet your combination of filters against this "
+                    "dataset.  Please open an issue on Github "
+                    "(https://github.com/geopandas/pyogrio/issues) to report encountering "
+                    "this error."
+                ) from None
 
-        if return_fids:
-            fid_view[i] = OGR_F_GetFID(ogr_feature)
+            if return_fids:
+                fid_view[i] = OGR_F_GetFID(ogr_feature)
 
-        if read_geometry:
-            process_geometry(ogr_feature, i, geom_view, force_2d)
+            if read_geometry:
+                process_geometry(ogr_feature, i, geom_view, force_2d)
 
-        process_fields(
-            ogr_feature, i, n_fields, field_data, field_data_view,
-            field_indexes, field_ogr_types, encoding
-        )
-        i += 1
+            process_fields(
+                ogr_feature, i, n_fields, field_data, field_data_view,
+                field_indexes, field_ogr_types, encoding
+            )
+            i += 1
+
+        finally:
+            if ogr_feature != NULL:
+                OGR_F_Destroy(ogr_feature)
+                ogr_feature = NULL
 
     # There may be fewer rows available than expected from OGR_L_GetFeatureCount,
     # such as features with bounding boxes that intersect the bbox
@@ -734,21 +740,26 @@ cdef get_features_by_fid(
         fid = fids[i]
 
         try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetFeature(ogr_layer, fid))
+            try:
+                ogr_feature = exc_wrap_pointer(OGR_L_GetFeature(ogr_layer, fid))
 
-        except NullPointerError:
-            raise FeatureError(f"Could not read feature with fid {fid}") from None
+            except NullPointerError:
+                raise FeatureError(f"Could not read feature with fid {fid}") from None
 
-        except CPLE_BaseError as exc:
-            raise FeatureError(str(exc))
+            except CPLE_BaseError as exc:
+                raise FeatureError(str(exc))
 
-        if read_geometry:
-            process_geometry(ogr_feature, i, geom_view, force_2d)
+            if read_geometry:
+                process_geometry(ogr_feature, i, geom_view, force_2d)
 
-        process_fields(
-            ogr_feature, i, n_fields, field_data, field_data_view,
-            field_indexes, field_ogr_types, encoding
-        )
+            process_fields(
+                ogr_feature, i, n_fields, field_data, field_data_view,
+                field_indexes, field_ogr_types, encoding
+            )
+        finally:
+            if ogr_feature != NULL:
+                OGR_F_Destroy(ogr_feature)
+                ogr_feature = NULL          
 
     return (geometries, field_data)
 
@@ -783,38 +794,44 @@ cdef get_bounds(
             break
 
         try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
+            try:
+                ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
 
-        except NullPointerError:
-            # No more rows available, so stop reading
-            break
+            except NullPointerError:
+                # No more rows available, so stop reading
+                break
 
-        except CPLE_BaseError as exc:
-            if "failed to prepare SQL" in str(exc):
-                raise ValueError(f"Invalid SQL query") from exc
+            except CPLE_BaseError as exc:
+                if "failed to prepare SQL" in str(exc):
+                    raise ValueError(f"Invalid SQL query") from exc
+                else:
+                    raise FeatureError(str(exc))
+
+            if i >= num_features:
+                raise FeatureError(
+                    "Reading more features than indicated by OGR_L_GetFeatureCount is not supported"
+                ) from None
+
+            fid_view[i] = OGR_F_GetFID(ogr_feature)
+
+            ogr_geometry = OGR_F_GetGeometryRef(ogr_feature)
+
+            if ogr_geometry == NULL:
+                bounds_view[:,i] = np.nan
+
             else:
-                raise FeatureError(str(exc))
+                OGR_G_GetEnvelope(ogr_geometry, &ogr_envelope)
+                bounds_view[0, i] = ogr_envelope.MinX
+                bounds_view[1, i] = ogr_envelope.MinY
+                bounds_view[2, i] = ogr_envelope.MaxX
+                bounds_view[3, i] = ogr_envelope.MaxY
 
-        if i >= num_features:
-            raise FeatureError(
-                "Reading more features than indicated by OGR_L_GetFeatureCount is not supported"
-            ) from None
+            i += 1
 
-        fid_view[i] = OGR_F_GetFID(ogr_feature)
-
-        ogr_geometry = OGR_F_GetGeometryRef(ogr_feature)
-
-        if ogr_geometry == NULL:
-            bounds_view[:,i] = np.nan
-
-        else:
-            OGR_G_GetEnvelope(ogr_geometry, &ogr_envelope)
-            bounds_view[0, i] = ogr_envelope.MinX
-            bounds_view[1, i] = ogr_envelope.MinY
-            bounds_view[2, i] = ogr_envelope.MaxX
-            bounds_view[3, i] = ogr_envelope.MaxY
-
-        i += 1
+        finally:
+            if ogr_feature != NULL:
+                OGR_F_Destroy(ogr_feature)
+                ogr_feature = NULL
 
     # Less rows read than anticipated, so drop empty rows
     if i < num_features:
