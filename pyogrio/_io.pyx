@@ -469,44 +469,6 @@ cdef validate_feature_range(OGRLayerH ogr_layer, int skip_features=0, int max_fe
 
 @cython.boundscheck(False)  # Deactivate bounds checking
 @cython.wraparound(False)   # Deactivate negative indexing.
-cdef process_geometry(OGRFeatureH ogr_feature, int i, geom_view, uint8_t force_2d):
-
-    cdef OGRGeometryH ogr_geometry = NULL
-    cdef OGRwkbGeometryType ogr_geometry_type
-
-    cdef unsigned char *wkb = NULL
-    cdef int ret_length
-
-    ogr_geometry = OGR_F_GetGeometryRef(ogr_feature)
-
-    if ogr_geometry == NULL:
-        geom_view[i] = None
-    else:
-        try:
-            ogr_geometry_type = OGR_G_GetGeometryType(ogr_geometry)
-
-            # if geometry has M values, these need to be removed first
-            if (OGR_G_IsMeasured(ogr_geometry)):
-                OGR_G_SetMeasured(ogr_geometry, 0)
-
-            if force_2d and OGR_G_Is3D(ogr_geometry):
-                OGR_G_Set3D(ogr_geometry, 0)
-
-            # if non-linear (e.g., curve), force to linear type
-            if OGR_GT_IsNonLinear(ogr_geometry_type):
-                ogr_geometry = OGR_G_GetLinearGeometry(ogr_geometry, 0, NULL)
-
-            ret_length = OGR_G_WkbSize(ogr_geometry)
-            wkb = <unsigned char*>malloc(sizeof(unsigned char)*ret_length)
-            OGR_G_ExportToWkb(ogr_geometry, 1, wkb)
-            geom_view[i] = wkb[:ret_length]
-
-        finally:
-            free(wkb)
-
-
-@cython.boundscheck(False)  # Deactivate bounds checking
-@cython.wraparound(False)   # Deactivate negative indexing.
 cdef process_fields(
     OGRFeatureH ogr_feature,
     int i,
@@ -603,17 +565,11 @@ cdef get_features(
     int num_features,
     uint8_t return_fids
 ):
-
-    cdef OGRFeatureH ogr_feature = NULL
+    cdef ManagedOrgOGRFeature ogr_feature
     cdef int n_fields
     cdef int i
     cdef int field_index
-
-    # make sure layer is read from beginning
-    OGR_L_ResetReading(ogr_layer)
-
-    if skip_features > 0:
-        OGR_L_SetNextByIndex(ogr_layer, skip_features)
+    cdef OrgLayerIter ogr_layer_iter
 
     if return_fids:
         fid_data = np.empty(shape=(num_features), dtype=np.int64)
@@ -639,42 +595,19 @@ cdef get_features(
 
     field_data_view = [field_data[field_index][:] for field_index in range(n_fields)]
     i = 0
-    while True:
-        if num_features > 0 and i == num_features:
-            break
-
-        try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
-
-        except NullPointerError:
-            # No more rows available, so stop reading
-            break
-
-        except CPLE_BaseError as exc:
-            if "failed to prepare SQL" in str(exc):
-                raise ValueError(f"Invalid SQL query") from exc
-
-            raise FeatureError(str(exc))
-
-        if i >= num_features:
-            raise FeatureError(
-                "GDAL returned more records than expected based on the count of "
-                "records that may meet your combination of filters against this "
-                "dataset.  Please open an issue on Github "
-                "(https://github.com/geopandas/pyogrio/issues) to report encountering "
-                "this error."
-            ) from None
-
+    ogr_layer_iter =  OrgLayerIter.from_ptr(ogr_layer, skip_features, num_features)
+    for ogr_feature in ogr_layer_iter:
         if return_fids:
-            fid_view[i] = OGR_F_GetFID(ogr_feature)
+            fid_view[i] = ogr_feature.fid
 
         if read_geometry:
-            process_geometry(ogr_feature, i, geom_view, force_2d)
+            geom_view[i] = ogr_feature.geometry_as_wkb(force_2d)
 
         process_fields(
-            ogr_feature, i, n_fields, field_data, field_data_view,
+            ogr_feature._ogr_feature, i, n_fields, field_data, field_data_view,
             field_indexes, field_ogr_types, encoding
         )
+
         i += 1
 
     # There may be fewer rows available than expected from OGR_L_GetFeatureCount,
@@ -703,6 +636,7 @@ cdef get_features_by_fid(
 ):
 
     cdef OGRFeatureH ogr_feature = NULL
+    cdef ManagedOrgOGRFeature manged_ogr_feature
     cdef int n_fields
     cdef int i
     cdef int fid
@@ -734,7 +668,9 @@ cdef get_features_by_fid(
         fid = fids[i]
 
         try:
+            # TODO: Memory leak
             ogr_feature = exc_wrap_pointer(OGR_L_GetFeature(ogr_layer, fid))
+            manged_ogr_feature = ManagedOrgOGRFeature.from_ptr(ogr_feature)
 
         except NullPointerError:
             raise FeatureError(f"Could not read feature with fid {fid}") from None
@@ -743,10 +679,10 @@ cdef get_features_by_fid(
             raise FeatureError(str(exc))
 
         if read_geometry:
-            process_geometry(ogr_feature, i, geom_view, force_2d)
+            geom_view[i] = manged_ogr_feature.geometry_as_wkb(force_2d)
 
         process_fields(
-            ogr_feature, i, n_fields, field_data, field_data_view,
+            manged_ogr_feature._ogr_feature, i, n_fields, field_data, field_data_view,
             field_indexes, field_ogr_types, encoding
         )
 
@@ -760,16 +696,11 @@ cdef get_bounds(
     int skip_features,
     int num_features):
 
-    cdef OGRFeatureH ogr_feature = NULL
+    cdef ManagedOrgOGRFeature ogr_feature
     cdef OGRGeometryH ogr_geometry = NULL
     cdef OGREnvelope ogr_envelope # = NULL
     cdef int i
-
-    # make sure layer is read from beginning
-    OGR_L_ResetReading(ogr_layer)
-
-    if skip_features > 0:
-        OGR_L_SetNextByIndex(ogr_layer, skip_features)
+    cdef OrgLayerIter ogr_layer_iter
 
     fid_data = np.empty(shape=(num_features), dtype=np.int64)
     fid_view = fid_data[:]
@@ -778,31 +709,11 @@ cdef get_bounds(
     bounds_view = bounds_data[:]
 
     i = 0
-    while True:
-        if num_features > 0 and i == num_features:
-            break
+    ogr_layer_iter = OrgLayerIter.from_ptr(ogr_layer, skip_features, num_features)
+    for ogr_feature in ogr_layer_iter:
+        fid_view[i] = ogr_feature.fid
 
-        try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
-
-        except NullPointerError:
-            # No more rows available, so stop reading
-            break
-
-        except CPLE_BaseError as exc:
-            if "failed to prepare SQL" in str(exc):
-                raise ValueError(f"Invalid SQL query") from exc
-            else:
-                raise FeatureError(str(exc))
-
-        if i >= num_features:
-            raise FeatureError(
-                "Reading more features than indicated by OGR_L_GetFeatureCount is not supported"
-            ) from None
-
-        fid_view[i] = OGR_F_GetFID(ogr_feature)
-
-        ogr_geometry = OGR_F_GetGeometryRef(ogr_feature)
+        ogr_geometry = ogr_feature.get_geometry_ref()
 
         if ogr_geometry == NULL:
             bounds_view[:,i] = np.nan
@@ -1491,3 +1402,113 @@ def ogr_write(str path, str layer, str driver, geometry, field_data, fields,
     ### Final cleanup
     if ogr_dataset != NULL:
         GDALClose(ogr_dataset)
+
+@cython.freelist(2)
+cdef class ManagedOrgOGRFeature:
+    @property
+    def fid(self):
+        return OGR_F_GetFID(self._ogr_feature)
+
+    cdef OGRGeometryH get_geometry_ref(self):
+        return OGR_F_GetGeometryRef(self._ogr_feature)
+
+    @cython.boundscheck(False)  # Deactivate bounds checking
+    @cython.wraparound(False)   # Deactivate negative indexing.
+    cdef bytes geometry_as_wkb(self, uint8_t force_2d):
+        cdef OGRGeometryH ogr_geometry = NULL
+        cdef OGRwkbGeometryType ogr_geometry_type
+
+        cdef unsigned char *wkb = NULL
+        cdef int ret_length
+
+        ogr_geometry = self.get_geometry_ref()
+
+        if ogr_geometry == NULL:
+            return None
+        else:
+            # if geometry has M values, these need to be removed first
+            if (OGR_G_IsMeasured(ogr_geometry)):
+                OGR_G_SetMeasured(ogr_geometry, 0)
+
+            if force_2d and OGR_G_Is3D(ogr_geometry):
+                OGR_G_Set3D(ogr_geometry, 0)
+
+            # if non-linear (e.g., curve), force to linear type
+            ogr_geometry_type = OGR_G_GetGeometryType(ogr_geometry)
+            if OGR_GT_IsNonLinear(ogr_geometry_type):
+                ogr_geometry = OGR_G_GetLinearGeometry(ogr_geometry, 0, NULL)
+
+            try:
+                ret_length = OGR_G_WkbSize(ogr_geometry)
+                wkb = <unsigned char*>malloc(sizeof(unsigned char)*ret_length)
+                OGR_G_ExportToWkb(ogr_geometry, 1, wkb)
+                return wkb[:ret_length]
+
+            finally:
+                free(wkb)
+
+    def __dealloc__(self):
+        if self._ogr_feature is not NULL:
+            OGR_F_Destroy(self._ogr_feature)
+            self._ogr_feature = NULL
+
+    @staticmethod
+    cdef ManagedOrgOGRFeature from_ptr(OGRFeatureH ogr_feature):
+        cdef ManagedOrgOGRFeature wrapper = ManagedOrgOGRFeature.__new__(ManagedOrgOGRFeature)
+        wrapper._ogr_feature = ogr_feature
+        return wrapper
+
+
+cdef class OrgLayerIter:
+    def __iter__(self):
+        # make sure layer is read from beginning
+        OGR_L_ResetReading(self._ogr_layer)
+
+        if self._skip_features > 0:
+            OGR_L_SetNextByIndex(self._ogr_layer, self._skip_features)
+
+        return self
+
+    def __next__(self):
+        cdef OGRFeatureH ogr_feature = NULL
+        cdef ManagedOrgOGRFeature manged_ogr_feature
+
+        if self._num_features > 0 and self._i == self._num_features:
+            raise StopIteration
+
+
+        try:
+            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(self._ogr_layer))
+            manged_ogr_feature = ManagedOrgOGRFeature.from_ptr(ogr_feature)
+
+        except NullPointerError:
+            # No more rows available, so stop reading
+            raise StopIteration
+
+        except CPLE_BaseError as exc:
+            if "failed to prepare SQL" in str(exc):
+                raise ValueError(f"Invalid SQL query") from exc
+
+            raise FeatureError(str(exc))
+
+        if self._i >= self._num_features:
+            raise FeatureError(
+                "GDAL returned more records than expected based on the count of "
+                "records that may meet your combination of filters against this "
+                "dataset.  Please open an issue on Github "
+                "(https://github.com/geopandas/pyogrio/issues) to report encountering "
+                "this error."
+            ) from None
+        
+        self._i += 1
+
+        return manged_ogr_feature
+
+    @staticmethod
+    cdef OrgLayerIter from_ptr(OGRLayerH ogr_layer, int skip_features, int num_features):
+        cdef OrgLayerIter wrapper = OrgLayerIter.__new__(OrgLayerIter)
+        wrapper._ogr_layer = ogr_layer
+        wrapper._skip_features = skip_features
+        wrapper._num_features = num_features
+        wrapper._i = 0
+        return wrapper
