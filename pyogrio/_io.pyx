@@ -604,7 +604,7 @@ cdef get_features(
     uint8_t return_fids
 ):
 
-    cdef OGRFeatureH ogr_feature = NULL
+    cdef ManagedOrgOGRFeature ogr_feature
     cdef int n_fields
     cdef int i
     cdef int field_index
@@ -644,7 +644,7 @@ cdef get_features(
             break
 
         try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
+            ogr_feature = ManagedOrgOGRFeature.from_ptr(exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer)))
 
         except NullPointerError:
             # No more rows available, so stop reading
@@ -666,16 +666,17 @@ cdef get_features(
             ) from None
 
         if return_fids:
-            fid_view[i] = OGR_F_GetFID(ogr_feature)
+            fid_view[i] = ogr_feature.fid
 
         if read_geometry:
-            process_geometry(ogr_feature, i, geom_view, force_2d)
+            process_geometry(ogr_feature._ogr_feature, i, geom_view, force_2d)
 
         process_fields(
-            ogr_feature, i, n_fields, field_data, field_data_view,
+            ogr_feature._ogr_feature, i, n_fields, field_data, field_data_view,
             field_indexes, field_ogr_types, encoding
         )
         i += 1
+
 
     # There may be fewer rows available than expected from OGR_L_GetFeatureCount,
     # such as features with bounding boxes that intersect the bbox
@@ -702,7 +703,7 @@ cdef get_features_by_fid(
     uint8_t force_2d
 ):
 
-    cdef OGRFeatureH ogr_feature = NULL
+    cdef ManagedOrgOGRFeature ogr_feature
     cdef int n_fields
     cdef int i
     cdef int fid
@@ -734,7 +735,7 @@ cdef get_features_by_fid(
         fid = fids[i]
 
         try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetFeature(ogr_layer, fid))
+            ogr_feature = ManagedOrgOGRFeature.from_ptr(exc_wrap_pointer(OGR_L_GetFeature(ogr_layer, fid)))
 
         except NullPointerError:
             raise FeatureError(f"Could not read feature with fid {fid}") from None
@@ -743,10 +744,10 @@ cdef get_features_by_fid(
             raise FeatureError(str(exc))
 
         if read_geometry:
-            process_geometry(ogr_feature, i, geom_view, force_2d)
+            process_geometry(ogr_feature._ogr_feature, i, geom_view, force_2d)
 
         process_fields(
-            ogr_feature, i, n_fields, field_data, field_data_view,
+            ogr_feature._ogr_feature, i, n_fields, field_data, field_data_view,
             field_indexes, field_ogr_types, encoding
         )
 
@@ -760,7 +761,7 @@ cdef get_bounds(
     int skip_features,
     int num_features):
 
-    cdef OGRFeatureH ogr_feature = NULL
+    cdef ManagedOrgOGRFeature ogr_feature
     cdef OGRGeometryH ogr_geometry = NULL
     cdef OGREnvelope ogr_envelope # = NULL
     cdef int i
@@ -783,7 +784,7 @@ cdef get_bounds(
             break
 
         try:
-            ogr_feature = exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer))
+            ogr_feature = ManagedOrgOGRFeature.from_ptr(exc_wrap_pointer(OGR_L_GetNextFeature(ogr_layer)))
 
         except NullPointerError:
             # No more rows available, so stop reading
@@ -800,9 +801,9 @@ cdef get_bounds(
                 "Reading more features than indicated by OGR_L_GetFeatureCount is not supported"
             ) from None
 
-        fid_view[i] = OGR_F_GetFID(ogr_feature)
+        fid_view[i] = ogr_feature.fid
 
-        ogr_geometry = OGR_F_GetGeometryRef(ogr_feature)
+        ogr_geometry = OGR_F_GetGeometryRef(ogr_feature._ogr_feature)
 
         if ogr_geometry == NULL:
             bounds_view[:,i] = np.nan
@@ -1491,3 +1492,21 @@ def ogr_write(str path, str layer, str driver, geometry, field_data, fields,
     ### Final cleanup
     if ogr_dataset != NULL:
         GDALClose(ogr_dataset)
+
+
+@cython.freelist(2)
+cdef class ManagedOrgOGRFeature:
+    @property
+    def fid(self):
+        return OGR_F_GetFID(self._ogr_feature)
+
+    def __dealloc__(self):
+        if self._ogr_feature is not NULL:
+            OGR_F_Destroy(self._ogr_feature)
+            self._ogr_feature = NULL
+
+    @staticmethod
+    cdef ManagedOrgOGRFeature from_ptr(OGRFeatureH ogr_feature):
+        cdef ManagedOrgOGRFeature wrapper = ManagedOrgOGRFeature.__new__(ManagedOrgOGRFeature)
+        wrapper._ogr_feature = ogr_feature
+        return wrapper
